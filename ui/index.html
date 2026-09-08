@@ -324,6 +324,13 @@
                                             <p class="form-hint">MP3 is recommended for smaller file sizes (e.g.,
                                                 audiobooks).</p>
                                         </div>
+                                        <!-- [patched: output-filename field] -->
+                                        <div class="form-group">
+                                            <label for="output-filename" class="form-label">Output Filename</label>
+                                            <input type="text" id="output-filename" name="output_filename"
+                                                placeholder="leave blank for auto-generated name" class="form-input">
+                                            <p class="form-hint">Saved as this name (no extension needed) when disk-saving is enabled.</p>
+                                        </div>
                                         <div class="form-grid__full mt-4 flex-row items-center gap-4">
                                             <button id="save-gen-defaults-btn" type="button" class="btn ghost">Save
                                                 Generation Parameters</button>

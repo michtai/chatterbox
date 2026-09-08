@@ -1076,6 +1076,11 @@ document.addEventListener('DOMContentLoaded', async function () {
         } else if (currentVoiceMode === 'clone' && cloneReferenceSelect.value !== 'none') {
             jsonData.reference_audio_filename = cloneReferenceSelect.value;
         }
+        // [patched: output_filename in request]
+        const outputFilenameInput = document.getElementById('output-filename');
+        if (outputFilenameInput && outputFilenameInput.value.trim() !== '') {
+            jsonData.output_filename = outputFilenameInput.value.trim();
+        }
         return jsonData;
     }
 

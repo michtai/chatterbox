@@ -1339,10 +1339,15 @@ async def custom_tts_endpoint(
     exag_val = request.exaggeration if request.exaggeration is not None else get_gen_default_exaggeration()
     cfg_val = request.cfg_weight if request.cfg_weight is not None else get_gen_default_cfg_weight()
     param_tag = f"T{temp_val:.1f}_E{exag_val:.1f}_W{cfg_val:.1f}".replace(".", "")
-    suggested_filename_base = f"tts_output_{param_tag}_{timestamp_str}"
-    download_filename = utils.sanitize_filename(
-        f"{suggested_filename_base}.{output_format_str}"
-    )
+    # [patched: custom output_filename support]
+    if getattr(request, "output_filename", None):
+        custom_base = Path(request.output_filename).stem  # strip any extension user typed
+        download_filename = utils.sanitize_filename(f"{custom_base}.{output_format_str}")
+    else:
+        suggested_filename_base = f"tts_output_{param_tag}_{timestamp_str}"
+        download_filename = utils.sanitize_filename(
+            f"{suggested_filename_base}.{output_format_str}"
+        )
     headers = {"Content-Disposition": f'attachment; filename="{download_filename}"'}
 
     logger.info(
@@ -1356,6 +1361,16 @@ async def custom_tts_endpoint(
         output_file_path = output_dir / download_filename
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
+            # [patched: avoid overwriting existing files with the same name]
+            if output_file_path.exists():
+                base_stem, ext = output_file_path.stem, output_file_path.suffix
+                dedup_counter = 2
+                candidate_path = output_dir / f"{base_stem}_{dedup_counter}{ext}"
+                while candidate_path.exists():
+                    dedup_counter += 1
+                    candidate_path = output_dir / f"{base_stem}_{dedup_counter}{ext}"
+                output_file_path = candidate_path
+                download_filename = output_file_path.name
             with open(output_file_path, "wb") as f:
                 f.write(encoded_audio_bytes)
             if not output_file_path.exists() or output_file_path.stat().st_size < 100:

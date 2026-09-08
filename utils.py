@@ -213,6 +213,11 @@ POTENTIAL_END_PATTERN = re.compile(r'([.!?])(["\']?)(\s+|$)')
 BULLET_POINT_PATTERN = re.compile(r"(?:^|\n)([-•*]|\d+\.)[ \t]+")
 # Placeholder for non-verbal cues or special instructions within text (e.g., (laughs), (sighs)).
 NON_VERBAL_CUE_PATTERN = re.compile(r"(\([\w\s'-]+\))")
+# [patched: line-break sentence boundary support]
+# Matches a line break followed by what looks like the start of a new
+# sentence (uppercase letter, quote, or opening bracket) rather than a
+# lowercase continuation word.
+LINE_BREAK_BOUNDARY_PATTERN = re.compile(r"""\n(?=[A-Z"'\u201c\u2018([])""")
 
 
 # --- Audio Processing Utilities ---
@@ -979,7 +984,12 @@ def split_into_sentences(text: str) -> List[str]:
         logger.debug(
             "No bullet points detected; using punctuation-based sentence splitting."
         )
-        return _split_text_by_punctuation(text)
+        pre_segments = LINE_BREAK_BOUNDARY_PATTERN.split(text)
+        all_sentences: List[str] = []
+        for segment in pre_segments:
+            if segment and not segment.isspace():
+                all_sentences.extend(_split_text_by_punctuation(segment))
+        return all_sentences
 
 
 def _preprocess_and_segment_text(full_text: str) -> List[Tuple[Optional[str], str]]:
@@ -1023,6 +1033,34 @@ def _preprocess_and_segment_text(full_text: str) -> List[Tuple[Optional[str], st
     return segmented_with_tags
 
 
+# [patched: merge overly-short chunks]
+MIN_CHUNK_CHARS = 25
+
+
+def _merge_short_chunks(chunks: List[str], chunk_size: int) -> List[str]:
+    """
+    Merges any chunk shorter than MIN_CHUNK_CHARS into an adjacent chunk so
+    no standalone TTS call ever gets just a word or two on its own.
+    """
+    if len(chunks) <= 1:
+        return chunks
+    merged: List[str] = []
+    i = 0
+    while i < len(chunks):
+        current = chunks[i]
+        if len(current) < MIN_CHUNK_CHARS:
+            if merged:
+                merged[-1] = merged[-1] + " " + current
+            elif i + 1 < len(chunks):
+                chunks[i + 1] = current + " " + chunks[i + 1]
+            else:
+                merged.append(current)
+        else:
+            merged.append(current)
+        i += 1
+    return merged
+
+
 def chunk_text_by_sentences(
     full_text: str,
     chunk_size: int,
@@ -1059,10 +1097,14 @@ def chunk_text_by_sentences(
     ) in processed_segments:
         segment_len = len(segment_text)
 
+        # [patched: max sentences per chunk]
         if not current_chunk_sentences:
             current_chunk_sentences.append(segment_text)
             current_chunk_length = segment_len
-        elif current_chunk_length + 1 + segment_len <= chunk_size:
+        elif (
+            current_chunk_length + 1 + segment_len <= chunk_size
+            and len(current_chunk_sentences) < 2
+        ):
             current_chunk_sentences.append(segment_text)
             current_chunk_length += 1 + segment_len
         else:
@@ -1090,6 +1132,8 @@ def chunk_text_by_sentences(
             "Text chunking resulted in zero chunks despite non-empty input. Returning full text as one chunk."
         )
         return [full_text.strip()]
+
+    text_chunks = _merge_short_chunks(text_chunks, chunk_size)
 
     logger.info(f"Text chunking complete. Generated {len(text_chunks)} chunk(s).")
     return text_chunks

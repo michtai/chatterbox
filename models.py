@@ -65,6 +65,12 @@ class CustomTTSRequest(BaseModel):
         "wav", description="Desired audio output format."  # Default output format
     )
 
+    # [patched: output_filename field]
+    output_filename: Optional[str] = Field(
+        None,
+        description="Optional filename (without extension) to save the output as, instead of an auto-generated name.",
+    )
+
     split_text: Optional[bool] = Field(
         True,  # Default to splitting enabled
         description="Whether to automatically split long text into chunks for processing.",
