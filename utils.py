@@ -1002,12 +1002,28 @@ def _split_text_by_punctuation(text: str) -> List[str]:
             continue
 
         if punctuation_char == ".":
-            if (
+            # [patched: ellipsis boundary support]
+            # A run of 2+ periods (e.g. "...") is an ellipsis used as a
+            # dramatic pause, not an abbreviation or decimal point. It's
+            # unambiguous, so - like "!" and "?" above - it always ends
+            # the current chunk here rather than being skipped entirely.
+            # Skipping it (the old behavior) made ellipsis-heavy text
+            # invisible to the splitter: everything between ellipses got
+            # glued into one giant "sentence" that bypassed chunk_size
+            # and got silently truncated by the TTS model's input limit.
+            is_ellipsis = (
                 punctuation_char_index > 0 and text[punctuation_char_index - 1] == "."
             ) or (
                 punctuation_char_index < text_length - 1
                 and text[punctuation_char_index + 1] == "."
-            ):
+            )
+            if is_ellipsis:
+                current_sentence_text = text[
+                    last_split_index:slice_end_after_punctuation
+                ].strip()
+                if current_sentence_text:
+                    sentences.append(current_sentence_text)
+                last_split_index = match.end()
                 continue
 
             if _is_valid_sentence_end(text, punctuation_char_index):
