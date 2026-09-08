@@ -214,10 +214,104 @@ BULLET_POINT_PATTERN = re.compile(r"(?:^|\n)([-•*]|\d+\.)[ \t]+")
 # Placeholder for non-verbal cues or special instructions within text (e.g., (laughs), (sighs)).
 NON_VERBAL_CUE_PATTERN = re.compile(r"(\([\w\s'-]+\))")
 # [patched: line-break sentence boundary support]
-# Matches a line break followed by what looks like the start of a new
-# sentence (uppercase letter, quote, or opening bracket) rather than a
-# lowercase continuation word.
-LINE_BREAK_BOUNDARY_PATTERN = re.compile(r"""\n(?=[A-Z"'\u201c\u2018([])""")
+# A line break is only treated as a sentence boundary when the line
+# before it is a short, dash-led attribution with no terminal
+# punctuation of its own, e.g.:
+#     -from "Manual of Muad'Dib" by the Princess Irulan
+# That's the one case where the punctuation-based splitter downstream
+# can't see a boundary but there really is one. Every other line wrap
+# - including one that happens to end on a capitalized word, like a
+# proper noun split across the wrap (e.g. "Kweezahtch\nHahdurack") -
+# is left as plain running text; ordinary sentence punctuation is what
+# decides real boundaries, not capitalization at the wrap point.
+ATTRIBUTION_LINE_PATTERN = re.compile(r"^-\s*\S")
+MAX_ATTRIBUTION_LINE_WORDS = 12
+# [patched: word-wrap hyphen rejoin]
+# Matches a hyphen glued directly to a letter at the very end of a
+# line, e.g. the "-" in "...laid in with hair-\nfine platinum...".
+# Used to tell "a word broken across the line wrap" apart from a
+# normal wrap that just happens to end on a word.
+WRAPPED_WORD_HYPHEN_PATTERN = re.compile(r"(?<=[A-Za-z])-$")
+# [patched: compound-hyphen normalization]
+# Matches a hyphen sitting directly between two letters, e.g. the "-"
+# in "hair-fine" or "cloud-milk", once any wrap-hyphenation has
+# already been rejoined above. Left alone: dashes with a space on
+# either side, and dashes at the start of a line (attribution lines).
+COMPOUND_HYPHEN_PATTERN = re.compile(r"(?<=[A-Za-z])-(?=[A-Za-z])")
+
+
+def _is_attribution_line(line: str) -> bool:
+    """
+    True for short, dash-prefixed, unpunctuated attribution lines
+    (see ATTRIBUTION_LINE_PATTERN comment above). False for everything
+    else, including ordinary prose wraps and dialogue interrupted by
+    a dash.
+    """
+    stripped = line.strip()
+    if not stripped or not ATTRIBUTION_LINE_PATTERN.match(stripped):
+        return False
+    if len(stripped.split()) > MAX_ATTRIBUTION_LINE_WORDS:
+        return False
+    if stripped[-1] in ".!?":
+        return False
+    return True
+
+
+def _join_wrapped_lines(lines: List[str]) -> str:
+    """
+    Joins the lines of one non-boundary segment into a single string.
+
+    If a line ends with a hyphen glued straight to a letter (see
+    WRAPPED_WORD_HYPHEN_PATTERN), that's a word broken across the line
+    wrap - e.g. "exam-" / "ple" - so the hyphen is dropped and the
+    pieces are rejoined with no space ("example"), not "exam- ple".
+    Every other line break just becomes a single space.
+    """
+    if not lines:
+        return ""
+    result = lines[0]
+    for line in lines[1:]:
+        if WRAPPED_WORD_HYPHEN_PATTERN.search(result):
+            result = result[:-1] + line
+        else:
+            result = result + " " + line
+    return result
+
+
+def _normalize_compound_hyphens(text: str) -> str:
+    """
+    Replaces a hyphen sitting directly between two letters (a
+    compound-word hyphen, e.g. "hair-fine", "cloud-milk") with a
+    space. Dashes with a space on either side, and dashes at the
+    start of a line, are left untouched.
+
+    This is a mitigation for the TTS model occasionally stopping
+    generation early when it hits an unusual hyphenated token - it
+    costs a little of the compound's visual tightness but doesn't
+    change how the underlying words are pronounced.
+    """
+    return COMPOUND_HYPHEN_PATTERN.sub(" ", text)
+
+
+def _split_on_line_break_boundaries(text: str) -> List[str]:
+    """
+    Splits text into segments at line breaks that follow an
+    attribution line. All other line breaks are plain wraps: lines
+    are rejoined via _join_wrapped_lines (which also repairs words
+    broken across the wrap) and kept inside the same segment, to be
+    handled by punctuation-based splitting like any other text.
+    """
+    lines = text.split("\n")
+    segments: List[str] = []
+    current_lines: List[str] = []
+    for line in lines:
+        current_lines.append(line)
+        if _is_attribution_line(line):
+            segments.append(_join_wrapped_lines(current_lines))
+            current_lines = []
+    if current_lines:
+        segments.append(_join_wrapped_lines(current_lines))
+    return segments
 
 
 # --- Audio Processing Utilities ---
@@ -984,7 +1078,7 @@ def split_into_sentences(text: str) -> List[str]:
         logger.debug(
             "No bullet points detected; using punctuation-based sentence splitting."
         )
-        pre_segments = LINE_BREAK_BOUNDARY_PATTERN.split(text)
+        pre_segments = _split_on_line_break_boundaries(text)
         all_sentences: List[str] = []
         for segment in pre_segments:
             if segment and not segment.isspace():
@@ -1134,6 +1228,7 @@ def chunk_text_by_sentences(
         return [full_text.strip()]
 
     text_chunks = _merge_short_chunks(text_chunks, chunk_size)
+    text_chunks = [_normalize_compound_hyphens(chunk) for chunk in text_chunks]
 
     logger.info(f"Text chunking complete. Generated {len(text_chunks)} chunk(s).")
     return text_chunks
