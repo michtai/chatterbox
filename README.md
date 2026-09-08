@@ -1123,6 +1123,7 @@ The primary endpoint for TTS generation is `/tts`. The OpenAI-compatible `/v1/au
 - `predefined_voice_id` (string) — voice filename when `voice_mode=predefined`.
 - `reference_audio_filename` (string) — reference filename when `voice_mode=clone`.
 - `output_format` ("wav" | "mp3" | "opus", default "wav"). Ignored when `stream=true` (streaming always uses WAV).
+- `output_filename` (string, optional) — custom filename (without extension) to save the output as, instead of an auto-generated `tts_output_..._<timestamp>` name. If a file with that name already exists, a `_2`, `_3`, etc. suffix is appended rather than overwriting it.
 - `split_text` (boolean, default `true`) — chunk long text by sentence.
 - `chunk_size` (integer 50–500, default 120).
 - `stream` (boolean, default `false`) — if true, returns a `StreamingResponse` that flushes WAV bytes as each chunk is synthesized.

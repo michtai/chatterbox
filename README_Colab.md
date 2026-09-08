@@ -1,301 +1,170 @@
 # README_Colab.md — Run Chatterbox TTS Server on Google Colab (T4 GPU)
 
-This guide shows how to run **Chatterbox-TTS-Server** in a fresh Google Colab notebook with a T4 GPU, using an isolated micromamba environment to avoid Colab package conflicts.  
-You will open the Web UI via Colab’s built-in port proxy: Colab displays a `https://localhost:PORT/` link that actually points to an externally reachable `*.colab.*` URL. [web:146]
+This guide walks through **`DELIGHTFUL_Chatterbox_simplified.ipynb`**, a Colab notebook that clones
+your fork, installs it into an isolated micromamba environment, and runs the server with a single
+committed voice and a set of pre-tuned generation defaults.
+
+Unlike the original upstream Colab demo, this notebook:
+- Clones **your own fork** (`michtai/chatterbox`) instead of the upstream repo, so all the patches
+  in this repo (sentence-splitting fixes, custom `output_filename` support, etc.) are already baked in —
+  no runtime patching of `utils.py`/`server.py` is needed.
+- Uses a **single committed voice** (`voices/delightful_really_soft.wav`) instead of the stock demo
+  voice set, which has been removed from this fork.
+- Mounts **Google Drive** and writes all generated audio to `MyDrive/chatterbox/outputs`, so output
+  persists across Colab sessions instead of disappearing when the runtime resets.
+- Applies pre-tuned **generation defaults** (temperature, exaggeration, CFG weight, seed, chunk size)
+  instead of the app's stock defaults.
+- **Pulls your latest commits automatically** every time you (re-)run the server, so pushing a fix to
+  your fork mid-session doesn't require redoing setup.
+
+You will open the Web UI via Colab's built-in port proxy: the notebook prints a `*.colab.*` URL once
+the server is ready.
 
 ---
 
-## What you will get
+## Before you start: add a `GITHUB_TOKEN` secret
 
-After completing Cells **1 → 4**:
-- The Web UI opens in your browser from the Colab proxy link. [web:146]
-- The Turbo model downloads on first run and loads on GPU.
-- The server status endpoint reports the model is loaded (Cell 4 prints `/api/model-info`). [file:21]
+The notebook clones `michtai/chatterbox` using a Colab secret called `GITHUB_TOKEN`. If the fork is
+private, this token is required (a GitHub [personal access token](https://github.com/settings/tokens)
+with `repo` read access is enough). Add it via the 🔑 **Secrets** tab in the left sidebar of Colab,
+name it exactly `GITHUB_TOKEN`, and toggle "Notebook access" on. If the fork is public, you can leave
+the secret unset — `userdata.get("GITHUB_TOKEN")` will just resolve to `None` and the clone URL will
+still work, since a `None` token embedded in the URL is harmless for a public repo.
+
+---
+
+## Notebook layout: 3 cells + a stop cell
+
+The notebook has exactly three cells that matter, plus one to stop the server:
+
+| # | Cell | Run it... |
+|---|------|-----------|
+| 1 | Environment + packages (micromamba, PyTorch, Chatterbox) | **Once** per Colab runtime |
+| 2 | Drive, clone your fork, server deps, voice + config | **Once** per Colab runtime |
+| 3 | Run server | **Every time** you want to (re-)start the server — including after pushing new commits |
+| — | Stop server | Whenever you want to free port 8004 |
+
+Cells 1 and 2 install things and don't need to be re-run just to restart the server or pick up code
+changes — that's what Cell 3 is for. Cell 3 runs `git fetch` + `git reset --hard origin/HEAD` against
+the clone made in Cell 2 before launching, so anything you've pushed to your fork since Cell 2 ran
+(or since the last time you ran Cell 3) is picked up automatically. It then re-applies your voice and
+`config.yaml` settings — `config.yaml` is a tracked file, so without this the hard reset would wipe
+out the local voice/output/generation-defaults it just set.
 
 ---
 
 ## Important rules (read first)
 
-- **Do not use “Run all.”** Cell 4 runs the server in the foreground and will keep running while the server is up, so “Run all” will either hang or behave unexpectedly.
-- Run cells **one-by-one**, waiting for each cell to finish before running the next cell.
+- **Do not use "Run all."** Cell 3 runs the server in the foreground and keeps running while the
+  server is up, so "Run all" will hang at that cell.
+- Run cells **in order** the first time. After that, Cell 3 is the only one you'll normally touch.
 - Keep the notebook tab open while using the Web UI; if the runtime disconnects, the server stops.
+- The first time you mount Google Drive (part of Cell 2), Colab will ask you to authorize access —
+  approve it.
 
 ---
 
-## First-time setup (Cells 1 → 4)
+## Cell-by-cell
 
-### Cell 1 — Create isolated Python 3.11 environment (micromamba)
+### Cell 1 — Environment + packages
 
-```
-%%bash
-set -e
+Creates the isolated `cb311` micromamba environment (skips creation if it already exists), installs
+PyTorch 2.5.1 (cu121) and `chatterbox-tts` from the `devnen/chatterbox-v2` fork, installs
+`s3tokenizer`/`onnx` with `--no-deps`, force-upgrades `protobuf` to resolve the conflict between
+`descript-audiotools` (pins `protobuf<3.20`) and `onnx` (needs `protobuf>=3.20.2`), then verifies CUDA
+is visible and that the installed Turbo build won't demand a Hugging Face auth token.
 
-cd /content
+### Cell 2 — Drive, clone, server deps, voice + config
 
-# Download micromamba into /content/bin/micromamba
-curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xvj bin/micromamba
+Defines all the settings the notebook uses (`REPO_OWNER`/`REPO_NAME`, `PORT`, the Drive output
+folder, the committed voice filename, chunk size, generation defaults) at the top — edit these if you
+want a different voice, chunk size, or defaults. Then:
+- Mounts Google Drive at `/content/drive` and creates `MyDrive/chatterbox/outputs`.
+- Clones your fork fresh into `/content/chatterbox`.
+- Installs `requirements-nvidia.txt` (or a fallback dependency list if that file is missing) and
+  force-upgrades `protobuf` again.
+- Patches the Chatterbox watermarker to fail open instead of crashing the server with
+  `'NoneType' object is not callable` on environments where Perth can't initialize (the same patch
+  `start.py` applies automatically outside Colab).
+- Defines `apply_voice_and_config()` (confirms the committed voice file exists, copies it into
+  `reference_audio/` if needed, and writes `config.yaml`: active model, default voice, output
+  directory, generation defaults, and the `ui_state` fields the Web UI reads on load — including
+  `last_chunk_size`, which is what the chunk-size slider, and therefore every `/tts` request, actually
+  uses; a top-level `chunking` key does **not** exist in the app's schema and is silently ignored) and
+  calls it once.
 
-# Create a clean env (isolated from Colab’s global packages)
-./bin/micromamba create -y -n cb311 -c conda-forge python=3.11 pip
+### Cell 3 — Run server
 
-echo "✅ micromamba ready at /content/bin/micromamba"
-echo "✅ env created: cb311"
-```
+`git fetch` + `git reset --hard origin/HEAD` against the Cell 2 clone, re-runs
+`apply_voice_and_config()`, then launches `server.py` in the foreground inside `cb311`. Streams logs
+live (collapsing noisy `Sampling: NN%|...` progress bars into compact dot progress), writes the full
+log to `/content/chatterbox_server_stdout.log`, and prints the Colab proxy link plus
+`/api/model-info` once the server is reachable.
 
----
+**First run note:** model downloads can take a while; watch the progress output.
 
-### Cell 2 — Install PyTorch (CUDA 12.1) + ONNX + Chatterbox fork
+### Stop cell — free port 8004
 
-Notes:
-- This uses **absolute paths** (`/content/bin/micromamba`) so it works regardless of current directory.
-- It force-reinstalls the package to avoid stale cached installs.
-
-```
-%%bash
-set -euo pipefail
-
-cd /content
-MICROMAMBA="/content/bin/micromamba"
-
-ts() { date +"[%Y-%m-%d %H:%M:%S]"; }
-
-echo "$(ts) Sanity check micromamba:"
-ls -lah "$MICROMAMBA"
-
-echo "$(ts) Upgrading pip tooling inside cb311..."
-"$MICROMAMBA" run -n cb311 python -m pip install -U pip setuptools wheel --progress-bar on
-
-echo "$(ts) Installing PyTorch 2.5.1 (CUDA 12.1)... (this can take a while)"
-"$MICROMAMBA" run -n cb311 pip install \
-  --progress-bar on \
-  torch==2.5.1+cu121 torchaudio==2.5.1+cu121 torchvision==0.20.1+cu121 \
-  --index-url https://download.pytorch.org/whl/cu121
-
-echo "$(ts) Installing ONNX (wheel)..."
-"$MICROMAMBA" run -n cb311 pip install --progress-bar on onnx==1.16.0
-
-echo "$(ts) Installing Chatterbox package (from GitHub, no-cache, upgrade)..."
-"$MICROMAMBA" run -n cb311 pip uninstall -y chatterbox-tts chatterbox || true
-"$MICROMAMBA" run -n cb311 pip install \
-  --no-cache-dir --upgrade \
-  --progress-bar on \
-  "chatterbox-tts @ git+https://github.com/devnen/chatterbox-v2.git@master"
-
-echo "$(ts) ✅ Installation complete!"
-```
-
----
-
-### Cell 3 — Verify GPU + verify Turbo won’t require Hugging Face tokens
-
-This checks CUDA visibility and prints the installed `from_pretrained()` source so you can confirm it does **not** force Hugging Face auth via a `token=True` fallback (in `huggingface_hub`, `token=True` means “read token from local config,” and errors if none exists). [web:65]
-
-```
-%%bash
-set -e
-
-/content/bin/micromamba run -n cb311 python - <<'PY'
-import inspect, torch
-import chatterbox.tts_turbo as t
-
-print("✅ torch:", torch.__version__)
-print("✅ cuda available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("✅ gpu:", torch.cuda.get_device_name(0))
-
-print("✅ chatterbox.tts_turbo path:", t.__file__)
-
-src = inspect.getsource(t.ChatterboxTurboTTS.from_pretrained)
-print("\n--- from_pretrained() (first ~80 lines) ---")
-print("\n".join(src.splitlines()[:80]))
-
-# Heuristic check for the common buggy pattern that forces token=True semantics
-markers = [" or True", "token=True", "token = True", "use_auth_token=True"]
-hits = [m for m in markers if m in src]
-print("\nHeuristic auth-forcing markers found:", hits)
-
-if hits:
-    raise SystemExit(
-        "\n❌ This install still appears to force HF auth.\n"
-        "Re-run Cell 2 (it already uses --no-cache-dir --upgrade).\n"
-    )
-
-print("\n✅ Looks good: Turbo should download without requiring user tokens.")
-PY
-```
-
----
-
-### Cell 4 — Clone server + run with full live logs (recommended)
-
-What this cell does:
-- Clones the server repo.
-- Installs server dependencies inside `cb311`.
-- Runs `server.py` in the **foreground** and prints all logs live.
-- Writes a full log file to: `/content/chatterbox_server_stdout.log`
-- Prints a Colab proxy link when port 8004 is reachable; Colab will show it as `https://localhost:8004/` but it resolves to a `*.colab.*` URL that opens in a new tab. [web:146]
-- Queries `/api/model-info` to confirm the model is loaded. [file:21]
-
-```
-# @title 4. Install Server + Run With Full Live Logs (foreground)
-import os, time, subprocess, socket, requests
-from pathlib import Path
-
-PORT = 8004
-REPO_DIR = "/content/Chatterbox-TTS-Server"
-LOG_STDOUT = "/content/chatterbox_server_stdout.log"
-
-def sh(cmd, check=False):
-    return subprocess.run(["bash", "-lc", cmd], check=check)
-
-def port_open(host="127.0.0.1", port=PORT, timeout=0.25):
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-os.chdir("/content")
-
-# Fresh clone
-sh("rm -rf /content/Chatterbox-TTS-Server", check=False)
-sh("git clone https://github.com/devnen/Chatterbox-TTS-Server.git", check=True)
-os.chdir(REPO_DIR)
-
-print("=== Quick system checks ===")
-sh("nvidia-smi || true", check=False)
-
-print("\n=== Installing server requirements (prefer repo pins if present) ===")
-if Path("requirements-nvidia.txt").exists():
-    sh("/content/bin/micromamba run -n cb311 pip install -U pip setuptools wheel", check=False)
-    sh("/content/bin/micromamba run -n cb311 pip install -r requirements-nvidia.txt", check=False)
-else:
-    sh(
-        "/content/bin/micromamba run -n cb311 pip install -U pip setuptools wheel && "
-        "/content/bin/micromamba run -n cb311 pip install "
-        "fastapi 'uvicorn[standard]' pyyaml soundfile librosa safetensors "
-        "python-multipart requests jinja2 watchdog aiofiles unidecode inflect tqdm "
-        "pydub audiotsm praat-parselmouth",
-        check=False
-    )
-
-print("\n=== Removing old stdout log ===")
-Path(LOG_STDOUT).unlink(missing_ok=True)
-
-print("\n=== Starting server with LIVE logs ===")
-print("Log file:", LOG_STDOUT)
-print("To stop the server, run Cell 5.\n")
-
-env = os.environ.copy()
-env["PYTHONUNBUFFERED"] = "1"
-
-# Put HF cache somewhere inspectable/persistent for this runtime
-env["HF_HOME"] = "/content/hf_home"
-env["TRANSFORMERS_CACHE"] = "/content/hf_home/transformers"
-env["HF_HUB_CACHE"] = "/content/hf_home/hub"
-Path(env["HF_HOME"]).mkdir(parents=True, exist_ok=True)
-
-proc = subprocess.Popen(
-    ["/content/bin/micromamba", "run", "-n", "cb311", "python", "-u", "server.py"],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True,
-    bufsize=1,
-    env=env,
-)
-
-with open(LOG_STDOUT, "w", encoding="utf-8", errors="replace") as f:
-    shown_link = False
-    while True:
-        line = proc.stdout.readline()
-        if line:
-            print(line, end="")
-            f.write(line)
-            f.flush()
-
-        if (not shown_link) and port_open():
-            shown_link = True
-            print("\n=== Server port is reachable ===")
-            print("Click the Colab proxy link below to open the Web UI.")
-            from google.colab.output import serve_kernel_port_as_window
-            serve_kernel_port_as_window(PORT)
-
-            # Verify model load status via server endpoint
-            try:
-                mi = requests.get(f"http://127.0.0.1:{PORT}/api/model-info", timeout=2).json()
-                print("\n/api/model-info:", mi)
-            except Exception as e:
-                print("\n/api/model-info query failed:", repr(e))
-
-        if proc.poll() is not None:
-            print("\n=== Server process exited with code", proc.returncode, "===")
-            break
-```
-
-**First run note:** model downloads can take a while; watch the progress output in Cell 4.
-
----
-
-## Stopping / restarting (Cell 5)
-
-### Cell 5 — Stop the server (free port 8004)
-
-Run this any time you want to stop the server process and free the port.
-
-```
-%%bash
-PORT=8004
-
-echo "PIDs listening on port $PORT:"
-sudo lsof -t -i:$PORT || true
-
-echo "Killing..."
-sudo kill -9 $(sudo lsof -t -i:$PORT) 2>/dev/null || true
-
-echo "Verify nothing is listening:"
-sudo lsof -i:$PORT || true
-```
+Run this any time you want to stop the server process.
 
 ---
 
 ## What to run when…
 
 ### Start it the first time
-Run: **Cell 1 → Cell 2 → Cell 3 → Cell 4** (in order, one-by-one).
+Run: **Cell 1 → Cell 2 → Cell 3** (in order, one-by-one).
 
 ### Stop the server
-Run: **Cell 5**
+Run: **the stop cell**.
 
-### Start the server again (same runtime, nothing changed)
-Run: **Cell 4**  
-If you get “address already in use,” run **Cell 5** and then rerun **Cell 4**.
+### Restart the server, or pick up new commits you pushed to your fork
+Run: **the stop cell**, then **Cell 3**. You don't need to re-run Cells 1 or 2.
+If you get "address already in use" without stopping first, run the stop cell and then rerun Cell 3.
 
-### After changing / updating packages
-Run:
-1) **Cell 5** (stop server)  
-2) **Cell 2** (reinstall packages)  
-3) **Cell 3** (verify install)  
-4) **Cell 4** (start server)
+### Change the voice, chunk size, or generation defaults
+Edit the values at the top of **Cell 2**, then re-run **Cell 2** (it's safe to re-run — cloning is a
+fresh `rm -rf` + `git clone` each time), then **Cell 3**.
+
+### After changing / updating Python packages
+Run: **the stop cell** → **Cell 1** → **Cell 2** → **Cell 3**.
 
 ---
 
 ## Troubleshooting
 
-### Web UI opens but TTS doesn’t work
-The server can be reachable even if the model didn’t load; always check `/api/model-info` (Cell 4 prints it) to confirm `loaded: True`. [file:21]
+### Web UI opens but TTS doesn't work
+The server can be reachable even if the model didn't load; always check `/api/model-info` (Cell 3
+prints it) to confirm `loaded: True`.
 
-### “Token is required (`token=True`), but no token found”
-Something in your installed Turbo code is still requesting `huggingface_hub` to read a local token (token=True semantics). [web:65]  
-Fix: re-run **Cell 2** and then confirm **Cell 3** does not show any auth-forcing markers.
+### "Token is required (`token=True`), but no token found"
+Something in your installed Turbo code is still requesting `huggingface_hub` to read a local token
+(`token=True` semantics).
+Fix: re-run **Cell 1** and confirm it doesn't report any auth-forcing markers.
 
-### “/content/bin/micromamba: No such file or directory”
-You likely restarted the runtime or Cell 1 didn’t complete; rerun **Cell 1**.
+### "/content/bin/micromamba: No such file or directory"
+You likely restarted the runtime or Cell 1 didn't complete; rerun **Cell 1**.
+
+### `git clone`/`git fetch` fails with "Repository not found" or an auth error
+Your `GITHUB_TOKEN` secret is missing, expired, or doesn't have read access to the fork. Check the
+🔑 Secrets tab and make sure "Notebook access" is enabled for it.
+
+### `Expected voices/<file> in the cloned repo but it's missing`
+Cell 2 or Cell 3 couldn't find `VOICE_FILENAME` (set at the top of Cell 2) under `voices/` in the
+cloned repo. Confirm the voice file is actually committed to your fork's `voices/` directory.
+
+### Where is generated audio saved?
+`MyDrive/chatterbox/outputs` in your Google Drive (set by `DRIVE_OUTPUTS_DIR` in Cell 2 and written
+into `config.yaml`'s `paths.output`). Each generation writes a new file — if a name collision would
+occur (e.g. you send a repeated custom `output_filename`), the server appends `_2`, `_3`, etc. rather
+than overwriting the earlier file.
 
 ### Where are model files cached?
-During Cell 4, downloads are stored under `/content/hf_home` (set by `HF_HOME` in Cell 4). [web:65]
+During Cell 3, downloads are stored under `/content/hf_home` (set by `HF_HOME` in Cell 3).
 
 ---
 
 ## Notes
-- If Colab warns that `serve_kernel_port_as_window` might stop working, it still usually provides a working link; click the link that Colab prints (it looks like `https://localhost:8004/` but maps to a `*.colab.*` URL). [web:146]
-- For bug reports, attach `/content/chatterbox_server_stdout.log` and the `/api/model-info` output. [file:21]
+- For bug reports, attach `/content/chatterbox_server_stdout.log` and the `/api/model-info` output.
+- This notebook and fork are set up for one person's own voice and defaults; if you want the stock
+  multi-voice demo experience instead, use the upstream
+  [`devnen/Chatterbox-TTS-Server`](https://github.com/devnen/Chatterbox-TTS-Server) notebook instead.
