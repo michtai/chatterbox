@@ -1135,6 +1135,17 @@ def _merge_short_chunks(chunks: List[str], chunk_size: int) -> List[str]:
     """
     Merges any chunk shorter than MIN_CHUNK_CHARS into an adjacent chunk so
     no standalone TTS call ever gets just a word or two on its own.
+
+    Merging is bounded by chunk_size: a merge is only performed if the
+    result fits within chunk_size. Without this check, an already
+    two-sentence chunk sitting next to a short chunk could absorb it and
+    exceed chunk_size by several sentences' worth of text — exactly the
+    "cramming multiple sentences into one TTS call" failure mode chunk_size
+    exists to prevent, which can cause the model to drop or garble a word
+    at the resulting internal boundary (e.g. a short "Arrakis. Dune. Desert
+    Planet." run getting glued onto a full preceding sentence). If neither
+    the previous nor the next chunk has room, the short chunk is left
+    standalone rather than overflowing chunk_size.
     """
     if len(chunks) <= 1:
         return chunks
@@ -1143,9 +1154,9 @@ def _merge_short_chunks(chunks: List[str], chunk_size: int) -> List[str]:
     while i < len(chunks):
         current = chunks[i]
         if len(current) < MIN_CHUNK_CHARS:
-            if merged:
+            if merged and len(merged[-1]) + 1 + len(current) <= chunk_size:
                 merged[-1] = merged[-1] + " " + current
-            elif i + 1 < len(chunks):
+            elif i + 1 < len(chunks) and len(current) + 1 + len(chunks[i + 1]) <= chunk_size:
                 chunks[i + 1] = current + " " + chunks[i + 1]
             else:
                 merged.append(current)
