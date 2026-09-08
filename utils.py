@@ -55,6 +55,25 @@ except ImportError:
         "Parselmouth library not found. Unvoiced segment removal feature will be disabled."
     )
 
+# Optional import for wordfreq (for distinguishing a real hard-wrapped word,
+# e.g. "exam-" / "ple" -> "example", from an intentional hyphenated compound
+# that just happens to fall at a line break, e.g. "flow-" / "permanence").
+try:
+    from wordfreq import zipf_frequency
+
+    WORDFREQ_AVAILABLE = True
+    logger.info(
+        "wordfreq library found and will be used to disambiguate wrapped-word hyphens."
+    )
+except ImportError:
+    WORDFREQ_AVAILABLE = False
+    logger.warning(
+        "wordfreq library not found. Wrapped-line hyphens will always be joined "
+        "with no separator, which can mis-join intentional hyphenated compounds "
+        "that fall at a line break (e.g. 'flow-permanence' -> 'flowpermanence'). "
+        "Add 'wordfreq' to requirements.txt to enable this check."
+    )
+
 
 # --- Filename Sanitization ---
 def sanitize_filename(filename: str) -> str:
@@ -257,22 +276,83 @@ def _is_attribution_line(line: str) -> bool:
     return True
 
 
+# Below this zipf frequency, wordfreq has effectively never seen the word -
+# treat it as "not a real word" rather than trusting a noise-floor score.
+MIN_REAL_WORD_ZIPF = 0.0
+
+# A fragment right up against the wrap hyphen, e.g. the "exam" in "exam-" or
+# the "ple" in "ple platinum...". Deliberately just letters: apostrophes,
+# digits, etc. immediately at the boundary make this not a plain-word case,
+# so we fall back to the safe default there instead of guessing.
+_WORD_FRAGMENT_BEFORE_HYPHEN = re.compile(r"([A-Za-z]+)-$")
+_WORD_FRAGMENT_AFTER_HYPHEN = re.compile(r"^([A-Za-z]+)")
+
+
+def _is_real_word(word: str) -> bool:
+    """
+    True if `word` is a word wordfreq actually knows about. Returns False
+    (rather than raising) if wordfreq isn't installed, so callers can treat
+    "unknown" the same as "not a real word" and fall back safely.
+    """
+    if not WORDFREQ_AVAILABLE or not word:
+        return False
+    return zipf_frequency(word.lower(), "en") > MIN_REAL_WORD_ZIPF
+
+
 def _join_wrapped_lines(lines: List[str]) -> str:
     """
     Joins the lines of one non-boundary segment into a single string.
 
-    If a line ends with a hyphen glued straight to a letter (see
-    WRAPPED_WORD_HYPHEN_PATTERN), that's a word broken across the line
-    wrap - e.g. "exam-" / "ple" - so the hyphen is dropped and the
-    pieces are rejoined with no space ("example"), not "exam- ple".
-    Every other line break just becomes a single space.
+    A line ending in a hyphen glued straight to a letter (see
+    WRAPPED_WORD_HYPHEN_PATTERN) is ambiguous on its own: it could be a
+    single word broken across the line wrap - e.g. "exam-" / "ple", meant
+    to read as "example" - or it could be two complete words joined by an
+    intentional hyphenated compound that just happens to land on a line
+    break - e.g. "flow-" / "permanence", meant to read as "flow-permanence"
+    (or "flow permanence" once spoken), not the nonsense "flowpermanence".
+
+    Both look identical as plain text, so we resolve them the same way a
+    proofreader would: check whether gluing the two adjacent fragments
+    together with no separator produces a real word.
+      - "exam" + "ple" -> "example", a real word -> join with no separator.
+      - "flow" + "permanence" -> "flowpermanence", not a real word -> keep
+        the hyphen. (_normalize_compound_hyphens later turns that surviving
+        hyphen into a space, same as any other compound hyphen in the text,
+        so it's spoken as two words instead of one glued nonsense token.)
+
+    Testing the fragments individually instead of their glued form would
+    misfire here: "exam" is *also* a real standalone word, so a check like
+    "is the first fragment a real word" would wrongly call "exam-"/"ple" a
+    compound and refuse to join it.
+
+    If wordfreq isn't installed, or the fragments right at the hyphen
+    aren't plain letters (e.g. an apostrophe or digit sits at the
+    boundary), this falls back to the original always-glue behavior rather
+    than guessing.
+
+    Every line break that doesn't end in a wrap hyphen just becomes a
+    single space.
     """
     if not lines:
         return ""
     result = lines[0]
     for line in lines[1:]:
         if WRAPPED_WORD_HYPHEN_PATTERN.search(result):
-            result = result[:-1] + line
+            before_match = _WORD_FRAGMENT_BEFORE_HYPHEN.search(result)
+            after_match = _WORD_FRAGMENT_AFTER_HYPHEN.match(line)
+            if before_match and after_match and WORDFREQ_AVAILABLE:
+                glued_word = before_match.group(1) + after_match.group(1)
+                if _is_real_word(glued_word):
+                    result = result[:-1] + line
+                else:
+                    # Keep the hyphen rather than dropping it silently;
+                    # _normalize_compound_hyphens will turn it into a
+                    # space downstream, same as any other compound hyphen.
+                    result = result + line
+            else:
+                # No wordfreq available, or the boundary isn't plain
+                # letters on both sides - preserve the original behavior.
+                result = result[:-1] + line
         else:
             result = result + " " + line
     return result

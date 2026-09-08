@@ -48,6 +48,7 @@ soundfile>=0.12.0
 pydub>=0.25.0
 audiotsm>=0.1.2
 praat-parselmouth>=0.4.0
+wordfreq>=3.0.0  # For dictionary-word check when rejoining line-wrapped text
 
 # --- Web & API Utilities ---
 python-multipart>=0.0.5

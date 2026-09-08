@@ -26,5 +26,6 @@ tqdm
 # Audio Post-processing
 pydub
 praat-parselmouth # For unvoiced segment removal
+wordfreq>=3.0.0  # For dictionary-word check when rejoining line-wrapped text
 librosa # for changes to sampling
 hf-transfer
